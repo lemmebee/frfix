@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1a1a2e"/>
+      <stop offset="100%" stop-color="#0f0f1e"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="0" y="0" width="256" height="256" rx="48" fill="url(#bg)"/>
+
+  <!-- French tricolor stripe -->
+  <rect x="24" y="208" width="69.33" height="16" rx="4" fill="#0055A4"/>
+  <rect x="93.33" y="208" width="69.33" height="16" fill="#FFFFFF"/>
+  <rect x="162.66" y="208" width="69.34" height="16" rx="4" fill="#EF4135"/>
+
+  <!-- accent aigu over the 'e' to suggest correction -->
+  <path d="M 168 56 L 196 40" stroke="#4ecca3" stroke-width="10" stroke-linecap="round"/>
+
+  <!-- "fré" letters -->
+  <text x="128" y="180"
+        font-family="'DejaVu Sans', 'Liberation Sans', Arial, sans-serif"
+        font-size="150" font-weight="700"
+        text-anchor="middle" fill="#e0e0e0"
+        letter-spacing="-4">fré</text>
+</svg>
