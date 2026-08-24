@@ -1,7 +1,8 @@
 """frfix — main daemon entry point."""
 
 import asyncio
-import subprocess
+import signal
+import sys
 
 from .buffer import TextBuffer, EventType
 from .capture import KeystrokeCapture, KeyAction
@@ -18,7 +19,7 @@ class FrfixDaemon:
     """Main daemon orchestrating all components."""
 
     def __init__(self, skip_layout_check: bool = False, debug: bool = False,
-                 force_layout: str | None = None):
+                 force_layout: str | None = None, switch_layout: bool | None = None):
         self.config = load_config()
         self.buffer = TextBuffer()
         self.corrector = FrenchCorrector(user_words=self.config.user_words)
@@ -28,44 +29,37 @@ class FrfixDaemon:
 
         self._skip_layout_check = skip_layout_check
         self._debug = debug
+        self._switch_layout = (
+            self.config.auto_switch_layout if switch_layout is None else switch_layout
+        )
         self._is_french = skip_layout_check
         self._original_layout_idx: int | None = None
 
-    def _get_layout_index(self) -> int:
-        try:
-            result = subprocess.run(
-                ["gsettings", "get", "org.gnome.desktop.input-sources", "current"],
-                capture_output=True, text=True, timeout=1,
-            )
-            return int(result.stdout.strip().split()[-1])
-        except Exception:
-            return 0
-
-    def _set_layout_index(self, idx: int) -> None:
-        try:
-            subprocess.run(
-                ["gsettings", "set", "org.gnome.desktop.input-sources",
-                 "current", f"uint32 {idx}"],
-                timeout=2,
-            )
-        except Exception:
-            pass
-
     def _switch_to_french(self) -> None:
-        layouts = self.translator._layouts
-        if "fr" in layouts:
-            self._original_layout_idx = self._get_layout_index()
-            fr_idx = layouts.index("fr")
-            self._set_layout_index(fr_idx)
-            self.translator._group = fr_idx
+        """Put the session on a French layout, remembering what to restore."""
+        self._original_layout_idx = self.translator.switch_to("fr")
 
     def _restore_layout(self) -> None:
         if self._original_layout_idx is not None:
-            self._set_layout_index(self._original_layout_idx)
+            self.translator.restore(self._original_layout_idx)
+            self._original_layout_idx = None
+
+    def _print_banner(self) -> None:
+        layouts = self.translator.layouts()
+        print(
+            f"frfix started.\n"
+            f"  layout backend : {self.translator.backend_name} "
+            f"({', '.join(layouts) if layouts else 'none detected'})\n"
+            f"  keymap source  : {self.translator.source}\n"
+            f"  injection      : {self.injector.backend_name}\n"
+            f"  active layout  : {self.translator.active_layout() or 'unknown'} "
+            f"(French: {self._is_french})"
+        )
+        print("Press Ctrl+C to stop.")
 
     async def run(self) -> None:
         """Main event loop."""
-        if not self.translator.is_french():
+        if self._switch_layout and not self.translator.is_french():
             self._switch_to_french()
 
         if not self._skip_layout_check:
@@ -75,25 +69,43 @@ class FrfixDaemon:
             self._is_french = True
             layout_task = None
 
-        print(f"frfix started. French layout active: {self._is_french}")
-        print("Press Ctrl+C to stop.")
+        self._print_banner()
 
+        # systemd stops the service with SIGTERM, which by default kills the
+        # process outright and skips the cleanup below, leaving the keyboard on
+        # whatever layout the daemon switched it to. Handle it explicitly.
+        loop = asyncio.get_running_loop()
+        stop = asyncio.Event()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(sig, stop.set)
+            except (NotImplementedError, RuntimeError):
+                pass
+
+        consumer = asyncio.create_task(self._consume_events())
+        stopper = asyncio.create_task(stop.wait())
         try:
-            async for key_event in self.capture.events():
-                if not self._is_french:
-                    self.buffer.reset()
-                    continue
-
-                await self._handle_key(key_event)
-        except KeyboardInterrupt:
+            await asyncio.wait({consumer, stopper}, return_when=asyncio.FIRST_COMPLETED)
+            if consumer.done():
+                consumer.result()  # surface capture errors instead of exiting silently
+        except (KeyboardInterrupt, asyncio.CancelledError):
             pass
         finally:
-            if layout_task:
-                layout_task.cancel()
+            for task in (consumer, stopper, layout_task):
+                if task:
+                    task.cancel()
             self._restore_layout()
             self.translator.close()
             self.injector.close()
-            print("\nfrfix stopped.")
+            print("frfix stopped.")
+
+    async def _consume_events(self) -> None:
+        """Feed captured keystrokes into the correction pipeline."""
+        async for key_event in self.capture.events():
+            if not self._is_french:
+                self.buffer.reset()
+                continue
+            await self._handle_key(key_event)
 
     async def _handle_key(self, key_event) -> None:
         if key_event.action == KeyAction.UNDO:
@@ -206,14 +218,29 @@ def main():
                         help="Print debug info (keystrokes, corrections)")
     parser.add_argument("--force-layout", type=str, default=None,
                         help="Force a specific layout (e.g., 'fr')")
+    parser.add_argument("--switch-layout", action="store_true", default=None,
+                        help="Switch the keyboard to French on startup "
+                             "(overrides general.auto_switch_layout)")
     args = parser.parse_args()
 
     try:
-        asyncio.run(FrfixDaemon(
+        daemon = FrfixDaemon(
             skip_layout_check=args.no_layout_check,
             debug=args.debug,
             force_layout=args.force_layout,
-        ).run())
+            switch_layout=args.switch_layout,
+        )
+    except RuntimeError as exc:
+        # Missing injection backend or unreadable input devices: both are
+        # setup problems, and a traceback tells the user nothing useful.
+        print(f"frfix: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+
+    try:
+        asyncio.run(daemon.run())
+    except RuntimeError as exc:
+        print(f"frfix: {exc}", file=sys.stderr)
+        raise SystemExit(1)
     except KeyboardInterrupt:
         print("\nBye.")
 

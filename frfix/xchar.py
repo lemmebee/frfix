@@ -1,147 +1,203 @@
-"""Translate evdev keycodes to actual characters using X11 keysym tables.
+"""Translate evdev keycodes into the characters the active layout produces.
 
-evdev gives physical keycodes. We use python-xlib to look up the correct
-character based on the active keyboard group (layout) and modifier state.
+evdev reports physical keycodes, so the layout has to be applied by hand.
+This uses libxkbcommon, which is what both X11 and every Wayland compositor use
+internally, so a keymap built here matches what applications actually receive.
+It needs no display-server connection, which matters on Wayland: XWayland is
+handed a fixed `us` keymap and never follows the compositor's layout switches,
+so reading the X keysym table there returns the wrong characters.
 
-evdev keycode + 8 = X11 keycode.
-keysym index = (group * 4) + level, where level depends on shift/altgr.
+If libxkbcommon is unavailable we fall back to a built-in French AZERTY table,
+since French is the only layout frfix corrects for.
+
+evdev keycode + 8 = xkb keycode.
 """
 
-import subprocess
+from . import layout as layout_mod
 
-from Xlib import display, XK
+try:
+    from xkbcommon import xkb as _xkb
+except Exception:  # pragma: no cover - exercised only where libxkbcommon is absent
+    _xkb = None
+
+# Built-in fr AZERTY map, used only when libxkbcommon is unavailable.
+# evdev keycode -> (base, shift, altgr). Empty string = no character.
+_AZERTY: dict[int, tuple[str, str, str]] = {
+    2: ("&", "1", ""),    3: ("é", "2", "~"),   4: ('"', "3", "#"),
+    5: ("'", "4", "{"),   6: ("(", "5", "["),   7: ("-", "6", "|"),
+    8: ("è", "7", "`"),   9: ("_", "8", "\\"),  10: ("ç", "9", "^"),
+    11: ("à", "0", "@"),  12: (")", "°", "]"),  13: ("=", "+", "}"),
+    16: ("a", "A", "æ"),  17: ("z", "Z", "«"),  18: ("e", "E", "€"),
+    19: ("r", "R", ""),   20: ("t", "T", ""),   21: ("y", "Y", ""),
+    22: ("u", "U", ""),   23: ("i", "I", ""),   24: ("o", "O", ""),
+    25: ("p", "P", ""),   27: ("$", "£", "¤"),
+    30: ("q", "Q", "@"),  31: ("s", "S", ""),   32: ("d", "D", ""),
+    33: ("f", "F", ""),   34: ("g", "G", ""),   35: ("h", "H", ""),
+    36: ("j", "J", ""),   37: ("k", "K", ""),   38: ("l", "L", ""),
+    39: ("m", "M", ""),   40: ("ù", "%", ""),   41: ("²", "", ""),
+    43: ("*", "µ", ""),   44: ("w", "W", ""),   45: ("x", "X", ""),
+    46: ("c", "C", ""),   47: ("v", "V", ""),   48: ("b", "B", ""),
+    49: ("n", "N", ""),   50: (",", "?", ""),   51: (";", ".", ""),
+    52: (":", "/", ""),   53: ("!", "§", ""),
+}
+
+# Level within a layout group: 0 plain, 1 shift, 2 altgr, 3 altgr+shift.
+def _level(shift: bool, altgr: bool) -> int:
+    if shift and altgr:
+        return 3
+    if altgr:
+        return 2
+    if shift:
+        return 1
+    return 0
 
 
 class KeyTranslator:
-    """Translate evdev keycodes to characters using X11 keysym tables."""
+    """Map evdev keycodes to characters, and report the active layout."""
 
     def __init__(self, force_layout: str | None = None):
-        self._display = display.Display()
-        self._group = 0  # Active keyboard group (0-based)
-        self._layouts: list[str] = []
+        self._backend = layout_mod.detect_backend()
         self._force_layout = force_layout
-        self._refresh_layout_info()
-        # If forced, set group to that layout
-        if self._force_layout and self._force_layout in self._layouts:
-            self._group = self._layouts.index(self._force_layout)
-        elif self._force_layout:
-            # Layout not in list, try xmodmap/setxkbmap fallback
-            self._refresh_layout_from_xkb()
+        self._keymap = None
+        self._keymap_codes: list[str] = []
+        self._build_keymap()
 
-    def _refresh_layout_info(self) -> None:
-        """Get layout list and active group from gsettings."""
-        try:
-            result = subprocess.run(
-                ["gsettings", "get", "org.gnome.desktop.input-sources", "sources"],
-                capture_output=True, text=True, timeout=1,
-            )
-            self._layouts = []
-            for part in result.stdout.strip().split("'"):
-                if len(part) <= 5 and part.isalpha() and part != "xkb":
-                    self._layouts.append(part)
-        except Exception:
-            self._layouts = []
+    # -- keymap ---------------------------------------------------------
 
-        self._update_group()
-
-    def _refresh_layout_from_xkb(self) -> None:
-        """Fallback: get layout list from setxkbmap."""
-        try:
-            result = subprocess.run(
-                ["setxkbmap", "-query"],
-                capture_output=True, text=True, timeout=1,
-            )
-            for line in result.stdout.splitlines():
-                if line.strip().startswith("layout:"):
-                    layouts_str = line.split(":", 1)[1].strip()
-                    self._layouts = [l.strip() for l in layouts_str.split(",")]
-                    if self._force_layout and self._force_layout in self._layouts:
-                        self._group = self._layouts.index(self._force_layout)
-                    break
-        except Exception:
-            pass
-
-    def _update_group(self) -> None:
-        """Update the active group index."""
+    def _codes(self) -> list[str]:
+        """Layout codes to compile, always with something usable in them."""
+        codes = self._backend.layouts()
+        if codes:
+            return codes
         if self._force_layout:
-            # Don't change group if forced
+            return [self._force_layout]
+        return ["fr"]
+
+    def _build_keymap(self) -> None:
+        """Compile the session's layout list into an xkb keymap."""
+        codes = self._codes()
+        if _xkb is None:
+            self._keymap_codes = codes
+            return
+        if self._keymap is not None and codes == self._keymap_codes:
             return
         try:
-            result = subprocess.run(
-                ["gsettings", "get", "org.gnome.desktop.input-sources", "current"],
-                capture_output=True, text=True, timeout=1,
+            context = _xkb.Context()
+            self._keymap = context.keymap_new_from_names(
+                layout=",".join(codes),
+                variant=self._backend.variants(),
+                options=self._backend.options(),
             )
-            self._group = int(result.stdout.strip().split()[-1])
         except Exception:
-            self._group = 0
+            # A bad variant/options string must not take the daemon down.
+            try:
+                context = _xkb.Context()
+                self._keymap = context.keymap_new_from_names(layout=",".join(codes))
+            except Exception:
+                self._keymap = None
+        self._keymap_codes = codes
 
-    def update_group(self) -> None:
-        """Public method to refresh active group."""
-        self._update_group()
+    @property
+    def backend_name(self) -> str:
+        return self._backend.name
 
-    def get_active_layout(self) -> str:
-        """Return the name of the active layout."""
-        self._update_group()
-        if self._group < len(self._layouts):
-            return self._layouts[self._group]
-        return ""
+    @property
+    def source(self) -> str:
+        return "xkbcommon" if self._keymap is not None else "builtin-azerty"
+
+    # -- layout state ---------------------------------------------------
+
+    def layouts(self) -> list[str]:
+        return self._backend.layouts()
+
+    def active_layout(self) -> str:
+        """xkb code of the layout currently in effect, e.g. "fr"."""
+        if self._force_layout:
+            return self._force_layout
+        codes = self._backend.layouts()
+        if not codes:
+            return ""
+        index = self._backend.current_index()
+        if index >= len(codes):
+            return ""
+        return codes[index]
 
     def is_french(self) -> bool:
-        """Check if current layout is French."""
-        return self.get_active_layout() == "fr"
+        active = self.active_layout()
+        return bool(active) and layout_mod.is_french_code(active)
+
+    def switch_to(self, code: str) -> int | None:
+        """Switch the session to a layout. Returns the previous index, or None."""
+        codes = self._backend.layouts()
+        if code not in codes:
+            return None
+        previous = self._backend.current_index()
+        if previous < len(codes) and codes[previous] == code:
+            return None
+        if not self._backend.set_index(codes.index(code)):
+            return None
+        return previous
+
+    def restore(self, index: int) -> None:
+        self._backend.set_index(index)
+
+    def _group(self) -> int:
+        """Index of the layout to translate against."""
+        codes = self._keymap_codes
+        if self._force_layout:
+            if self._force_layout in codes:
+                return codes.index(self._force_layout)
+            return 0
+        index = self._backend.current_index()
+        return index if index < len(codes) else 0
+
+    # -- translation ----------------------------------------------------
 
     def translate(self, evdev_keycode: int, shift: bool = False,
                   altgr: bool = False) -> str | None:
-        """Translate an evdev keycode to a character string.
+        """Return the character for a keycode, or None if it is not printable."""
+        self._build_keymap()
+        if self._keymap is None:
+            return self._translate_builtin(evdev_keycode, shift, altgr)
+        return self._translate_xkb(evdev_keycode, shift, altgr)
 
-        Args:
-            evdev_keycode: The evdev keycode (e.g., KEY_A = 30)
-            shift: Whether Shift is held
-            altgr: Whether AltGr is held
-
-        Returns:
-            The character string, or None if not a printable character.
-        """
-        x11_keycode = evdev_keycode + 8
-
-        # Compute keysym index: group * 4 + level
-        # level 0 = plain, 1 = shift, 2 = altgr, 3 = altgr+shift
-        level = 0
-        if shift:
-            level = 1
-        if altgr:
-            level = 2
-        if shift and altgr:
-            level = 3
-
-        keysym_index = (self._group * 4) + level
-        keysym = self._display.keycode_to_keysym(x11_keycode, keysym_index)
-
-        if keysym == 0:
-            # Try without altgr/shift variants
-            keysym = self._display.keycode_to_keysym(x11_keycode, self._group * 4)
-
-        if keysym == 0:
+    def _translate_builtin(self, evdev_keycode: int, shift: bool, altgr: bool) -> str | None:
+        entry = _AZERTY.get(evdev_keycode)
+        if not entry:
             return None
+        base, shifted, alt = entry
+        if altgr:
+            return alt or None
+        if shift:
+            return shifted or None
+        return base or None
 
-        # Convert keysym to string
-        char = XK.keysym_to_string(keysym)
-        if char and len(char) == 1:
-            return char
+    def _translate_xkb(self, evdev_keycode: int, shift: bool, altgr: bool) -> str | None:
+        keycode = evdev_keycode + 8
+        group = self._group()
+        level = _level(shift, altgr)
 
-        # Try Unicode keysym range (0x01000000 + codepoint)
-        if 0x01000000 <= keysym <= 0x0110FFFF:
-            return chr(keysym - 0x01000000)
+        char = self._syms_to_char(keycode, group, level)
+        if char is None and level != 0:
+            char = self._syms_to_char(keycode, group, 0)
+        return char
 
-        # Try direct Unicode mapping for common French chars
-        if 0x00c0 <= keysym <= 0x00ff:
-            return chr(keysym)
-
-        return None
+    def _syms_to_char(self, keycode: int, group: int, level: int) -> str | None:
+        try:
+            syms = self._keymap.key_get_syms_by_level(keycode, group, level)
+        except Exception:
+            return None
+        if not syms:
+            return None
+        try:
+            char = _xkb.keysym_to_string(syms[0])
+        except Exception:
+            return None
+        # Dead keys and named keys (Return, BackSpace) come back as None or a
+        # multi-character name; neither is a character the user typed.
+        if not char or len(char) != 1:
+            return None
+        return char
 
     def close(self) -> None:
-        """Clean up."""
-        try:
-            self._display.close()
-        except Exception:
-            pass
+        self._keymap = None

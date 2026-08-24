@@ -12,6 +12,10 @@ USER_DICT_FILE = CONFIG_DIR / "dictionary.txt"
 DEFAULT_CONFIG = """\
 [general]
 enabled = true
+# Switch the keyboard to French when the daemon starts. Off by default: as a
+# login service this would override the layout you actually chose. With it off,
+# frfix stays idle until you switch to French yourself.
+auto_switch_layout = false
 
 [corrections]
 spelling = true
@@ -42,6 +46,7 @@ class OverlayConfig:
 @dataclass
 class Config:
     enabled: bool = True
+    auto_switch_layout: bool = False
     spelling: bool = True
     grammar: bool = True
     overlay: OverlayConfig = field(default_factory=OverlayConfig)
@@ -63,6 +68,7 @@ def load_config() -> Config:
             data = tomllib.load(f)
         gen = data.get("general", {})
         cfg.enabled = gen.get("enabled", True)
+        cfg.auto_switch_layout = gen.get("auto_switch_layout", False)
         corr = data.get("corrections", {})
         cfg.spelling = corr.get("spelling", True)
         cfg.grammar = corr.get("grammar", True)
