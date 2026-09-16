@@ -1,14 +1,24 @@
+# Installed by setup.sh, which substitutes @FRFIX_BIN@ with the absolute path
+# to the frfix executable in this checkout's virtualenv. Editing this file has
+# no effect on an installed service; re-run setup.sh, or edit the copy in
+# ~/.config/systemd/user/frfix.service and run `systemctl --user daemon-reload`.
 [Unit]
 Description=frfix French autocorrect daemon
+Documentation=https://github.com/lemmebee/frfix
+# Tie the daemon's lifetime to the desktop session: it needs a compositor to
+# read the keyboard layout from and a focused window to type into.
+PartOf=graphical-session.target
 After=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=%h/frfix/.venv/bin/frfix
+# Without this Python block-buffers stdout when it is a journal pipe, so the
+# startup banner and debug output would never appear in `journalctl`.
+Environment=PYTHONUNBUFFERED=1
+ExecStart=@FRFIX_BIN@
 Restart=on-failure
 RestartSec=3
-Environment=DISPLAY=:0
-Environment=XAUTHORITY=%h/.Xauthority
+Slice=session.slice
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target

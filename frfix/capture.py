@@ -1,32 +1,24 @@
 """System-wide keystroke capture using evdev."""
 
 import asyncio
-import os
 from dataclasses import dataclass
 from enum import Enum, auto
-from pathlib import Path
 
 import evdev
-from evdev import InputDevice, categorize, ecodes
+from evdev import InputDevice, ecodes
 
 
 class KeyAction(Enum):
     CHAR = auto()
     BACKSPACE = auto()
     SPACE = auto()
-    ENTER = auto()
-    ARROW = auto()       # Any arrow key / Home / End / PgUp / PgDn
-    TAB = auto()
-    ESCAPE = auto()
-    UNDO = auto()         # Ctrl+Z
-    MODIFIER = auto()     # Ctrl/Alt/Super pressed alone
-    UNKNOWN = auto()
+    UNDO = auto()          # Ctrl+Z
+    RESET = auto()         # Enter/Tab/Escape/arrows/other shortcuts: drop the buffer
 
 
 @dataclass
 class KeyEvent:
     action: KeyAction
-    char: str = ""
     evdev_keycode: int = 0
     shift: bool = False
     altgr: bool = False
@@ -77,18 +69,6 @@ class KeystrokeCapture:
                 continue
         return keyboards
 
-    def flush_pending(self) -> None:
-        """Drain all pending events from evdev devices (call after XTEST injection)."""
-        for dev in self._devices:
-            try:
-                while True:
-                    # Non-blocking read — returns None when empty
-                    events = list(dev.read())
-                    if not events:
-                        break
-            except (BlockingIOError, OSError):
-                pass
-
     async def events(self):
         """Async generator yielding KeyEvent objects."""
         self._devices = self._find_keyboards()
@@ -127,7 +107,6 @@ class KeystrokeCapture:
         key = event.code
         # 1 = key down, 0 = key up, 2 = key repeat
         is_down = event.value in (1, 2)
-        is_up = event.value == 0
 
         # Track modifier state
         if key in (ecodes.KEY_LEFTCTRL, ecodes.KEY_RIGHTCTRL):
@@ -156,24 +135,18 @@ class KeystrokeCapture:
 
         # Skip if ctrl or alt held (shortcuts, not typing)
         if self._ctrl_held or self._alt_held:
-            return KeyEvent(action=KeyAction.MODIFIER)
+            return KeyEvent(action=KeyAction.RESET)
 
         if key == ecodes.KEY_BACKSPACE:
             return KeyEvent(action=KeyAction.BACKSPACE)
         if key == ecodes.KEY_SPACE:
-            return KeyEvent(action=KeyAction.SPACE, char=" ")
-        if key == ecodes.KEY_ENTER or key == ecodes.KEY_KPENTER:
-            return KeyEvent(action=KeyAction.ENTER)
-        if key == ecodes.KEY_TAB:
-            return KeyEvent(action=KeyAction.TAB)
-        if key == ecodes.KEY_ESC:
-            return KeyEvent(action=KeyAction.ESCAPE)
+            return KeyEvent(action=KeyAction.SPACE)
+        if key in (ecodes.KEY_ENTER, ecodes.KEY_KPENTER, ecodes.KEY_TAB, ecodes.KEY_ESC):
+            return KeyEvent(action=KeyAction.RESET)
         if key in ARROW_KEYS:
-            return KeyEvent(action=KeyAction.ARROW)
+            return KeyEvent(action=KeyAction.RESET)
         if key in CHAR_KEYS:
-            return KeyEvent(action=KeyAction.CHAR, char="",
-                            evdev_keycode=key,
-                            shift=self._shift_held,
-                            altgr=self._altgr_held)
+            return KeyEvent(action=KeyAction.CHAR, evdev_keycode=key,
+                            shift=self._shift_held, altgr=self._altgr_held)
 
         return None

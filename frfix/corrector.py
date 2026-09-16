@@ -3,7 +3,13 @@
 import unicodedata
 from dataclasses import dataclass
 
-import grammalecte
+try:
+    import grammalecte
+except ImportError as exc:  # pragma: no cover - depends on install state
+    raise ImportError(
+        "The Grammalecte engine is missing. It is not on PyPI; pygrammalecte "
+        "downloads it on first use. Run 'frfix-bootstrap' to install it."
+    ) from exc
 
 
 @dataclass
@@ -11,7 +17,6 @@ class Correction:
     """A single correction within a text."""
     start: int
     end: int
-    original: str
     replacement: str
 
 
@@ -123,7 +128,6 @@ class FrenchCorrector:
                         end = err.get("nEnd", 0)
                         corrections.append(Correction(
                             start=start, end=end,
-                            original=sentence[start:end],
                             replacement=sugg[0],
                         ))
         except Exception:
@@ -164,7 +168,7 @@ def _pick_best(original: str, suggestions: list[str]) -> str | None:
 
 
 def _normalize_apostrophe(text: str) -> str:
-    """Replace typographic apostrophe with ASCII for reliable xdotool injection."""
+    """Replace typographic apostrophe with ASCII for reliable key injection."""
     return text.replace("\u2019", "'").replace("\u2018", "'")
 
 

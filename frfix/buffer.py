@@ -1,6 +1,6 @@
 """Keystroke buffer with word/sentence boundary detection."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum, auto
 
 
@@ -28,7 +28,7 @@ SENTENCE_ENDINGS = set(".!?")
 class TextBuffer:
     current_word: str = ""
     current_sentence: str = ""
-    _last_corrections: list[tuple[str, str]] = field(default_factory=list)
+    _last_correction: tuple[str, str] | None = None
 
     def feed_char(self, char: str) -> BufferEvent:
         """Feed a character and return any triggered event."""
@@ -74,23 +74,18 @@ class TextBuffer:
         self.current_word = ""
         self.current_sentence = ""
 
-    def replace_last_word(self, new_word: str) -> None:
-        """Update sentence buffer after a word correction."""
-        if self.current_sentence.endswith(" "):
-            parts = self.current_sentence.rstrip().rsplit(" ", 1)
-            if len(parts) == 2:
-                self.current_sentence = parts[0] + " " + new_word + " "
-            else:
-                self.current_sentence = new_word + " "
-
     def push_correction(self, old: str, new: str) -> None:
-        """Store a correction for undo."""
-        self._last_corrections.append((old, new))
-        if len(self._last_corrections) > 20:
-            self._last_corrections.pop(0)
+        """Remember the last correction, for a single level of undo.
+
+        Only the most recent one: undo backspaces at the *current* caret,
+        which is only correct for the correction just made. Keeping a
+        deeper history would let undo eat text typed since an older
+        correction, so a ring buffer here would be a bug, not a feature.
+        """
+        self._last_correction = (old, new)
 
     def pop_correction(self) -> tuple[str, str] | None:
-        """Pop last correction for undo."""
-        if self._last_corrections:
-            return self._last_corrections.pop()
-        return None
+        """Consume the last correction for undo."""
+        last = self._last_correction
+        self._last_correction = None
+        return last
