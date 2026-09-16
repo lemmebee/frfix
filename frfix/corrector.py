@@ -12,6 +12,12 @@ except ImportError as exc:  # pragma: no cover - depends on install state
     ) from exc
 
 
+# Characters grammalecte suggests that must never be injected: U+00A0 and U+202F
+# (no-break spaces, untypeable), U+00B7 (middle dot, inclusive-writing rewrite of
+# ordinary "(s)" plurals by an always-on rule with no option group).
+_UNSAFE = frozenset("\xa0\u202f\u00b7")
+
+
 @dataclass
 class Correction:
     """A single correction within a text."""
@@ -27,6 +33,12 @@ class FrenchCorrector:
         self._user_words = {w.lower() for w in (user_words or set())}
         self._gc = grammalecte.GrammarChecker('fr')
         self._sp = self._gc.getSpellChecker()
+        # Start from defaults, minus groups that inject U+00A0 or rewrite plain
+        # ASCII into curly quotes, chevrons and dashes (typo/apos), which the
+        # _UNSAFE guard below would not catch on its own.
+        self._gc_options = self._gc.getGCEngine().getDefaultOptions() | dict.fromkeys(
+            ("typo", "apos", "nbsp", "unit"), False
+        )
 
     def check_word(self, word: str) -> str | None:
         """Check a single word. Returns correction or None if correct."""
@@ -117,19 +129,20 @@ class FrenchCorrector:
         """Check a full sentence for grammar errors."""
         corrections = []
         try:
-            errs = self._gc.getParagraphErrors(sentence)
-            if not errs:
-                return []
+            # Returns (grammar errors, spelling errors); check_word covers spelling.
+            errs, _spelling = self._gc.getParagraphErrors(
+                sentence, dOptions=self._gc_options
+            )
             for err in errs:
-                if isinstance(err, dict):
-                    sugg = err.get("aSuggestions", [])
-                    if len(sugg) == 1:
-                        start = err.get("nStart", 0)
-                        end = err.get("nEnd", 0)
-                        corrections.append(Correction(
-                            start=start, end=end,
-                            replacement=sugg[0],
-                        ))
+                sugg = err.get("aSuggestions", [])
+                # Enabled or ungrouped rules still emit unsafe characters ("num"
+                # gives U+00A0, "(s)" plurals give U+00B7); drop those suggestions.
+                if len(sugg) == 1 and not _UNSAFE.intersection(sugg[0]):
+                    corrections.append(Correction(
+                        start=err.get("nStart", 0),
+                        end=err.get("nEnd", 0),
+                        replacement=_normalize_apostrophe(sugg[0]),
+                    ))
         except Exception:
             pass
         return corrections

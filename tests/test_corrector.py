@@ -102,9 +102,47 @@ def test_check_sentence_survives_empty_input(corrector):
     assert corrector.check_sentence("") == []
 
 
-def test_reported_corrections_carry_the_span_they_replace(corrector):
-    for correction in corrector.check_sentence("Les chien sont dehors."):
-        assert correction.start <= correction.end
+def test_an_agreement_error_yields_a_real_correction(corrector):
+    assert [(c.start, c.end, c.replacement) for c in corrector.check_sentence(
+        "Les chien sont dehors."
+    )] == [(4, 9, "chiens")]
+
+
+def test_a_real_error_survives_while_typography_is_dropped(corrector):
+    # Default options would also suggest "\xa0:" (non-breaking space) here.
+    assert [(c.start, c.end, c.replacement) for c in corrector.check_sentence(
+        "Les chien sont dehors : ok."
+    )] == [(4, 9, "chiens")]
+
+
+def test_plural_notation_is_never_rewritten_with_a_middle_dot(corrector):
+    # An always-on rule (no option group) suggests "auteur\u00b7s" here.
+    assert corrector.check_sentence("Les auteur(s) du livre.") == []
+    assert corrector.check_sentence("Les client.s sont contents.") == []
+
+
+def test_unit_spacing_never_injects_a_non_breaking_space(corrector):
+    # Default options would suggest "5\xa0km" (unit group) here.
+    assert [(c.start, c.end, c.replacement) for c in corrector.check_sentence(
+        "Elle a 5 km a faire."
+    )] == [(12, 13, "à")]
+
+
+def test_thousands_grouping_never_injects_a_non_breaking_space(corrector):
+    # The still-enabled "num" group suggests "1\xa0000" here.
+    assert corrector.check_sentence("1000 km parcourus.") == []
+
+
+def test_letter_o_for_zero_is_still_corrected(corrector):
+    # Same "num" group as above; these are real typo fixes and must survive the guard.
+    assert [c.replacement for c in corrector.check_sentence("Il y a 1OO personnes.")] == ["100"]
+    assert [c.replacement for c in corrector.check_sentence("J'ai 3O ans.")] == ["30"]
+
+
+def test_a_sentence_correction_never_contains_a_typographic_apostrophe(corrector):
+    # grammalecte suggests "qu\u2019" for this elision error.
+    corrections = corrector.check_sentence("Je pense que il viendra.")
+    assert [c.replacement for c in corrections] == ["qu'"]
 
 
 @pytest.mark.parametrize(
