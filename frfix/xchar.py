@@ -7,8 +7,9 @@ It needs no display-server connection, which matters on Wayland: XWayland is
 handed a fixed `us` keymap and never follows the compositor's layout switches,
 so reading the X keysym table there returns the wrong characters.
 
-If libxkbcommon is unavailable we fall back to a built-in French AZERTY table,
-since French is the only layout frfix corrects for.
+libxkbcommon is a hard dependency (pyproject.toml, and setup.sh installs it on
+every distro it knows), so a missing or unusable keymap is a setup problem,
+not something to silently paper over with a guessed layout.
 
 evdev keycode + 8 = xkb keycode.
 """
@@ -17,29 +18,12 @@ from . import layout as layout_mod
 
 try:
     from xkbcommon import xkb as _xkb
-except Exception:  # pragma: no cover - exercised only where libxkbcommon is absent
-    _xkb = None
+except ImportError as exc:
+    raise ImportError(
+        "The xkbcommon Python bindings are missing. Install libxkbcommon "
+        "(setup.sh does this) and reinstall frfix."
+    ) from exc
 
-# Built-in fr AZERTY map, used only when libxkbcommon is unavailable.
-# evdev keycode -> (base, shift, altgr). Empty string = no character.
-_AZERTY: dict[int, tuple[str, str, str]] = {
-    2: ("&", "1", ""),    3: ("é", "2", "~"),   4: ('"', "3", "#"),
-    5: ("'", "4", "{"),   6: ("(", "5", "["),   7: ("-", "6", "|"),
-    8: ("è", "7", "`"),   9: ("_", "8", "\\"),  10: ("ç", "9", "^"),
-    11: ("à", "0", "@"),  12: (")", "°", "]"),  13: ("=", "+", "}"),
-    16: ("a", "A", "æ"),  17: ("z", "Z", "«"),  18: ("e", "E", "€"),
-    19: ("r", "R", ""),   20: ("t", "T", ""),   21: ("y", "Y", ""),
-    22: ("u", "U", ""),   23: ("i", "I", ""),   24: ("o", "O", ""),
-    25: ("p", "P", ""),   27: ("$", "£", "¤"),
-    30: ("q", "Q", "@"),  31: ("s", "S", ""),   32: ("d", "D", ""),
-    33: ("f", "F", ""),   34: ("g", "G", ""),   35: ("h", "H", ""),
-    36: ("j", "J", ""),   37: ("k", "K", ""),   38: ("l", "L", ""),
-    39: ("m", "M", ""),   40: ("ù", "%", ""),   41: ("²", "", ""),
-    43: ("*", "µ", ""),   44: ("w", "W", ""),   45: ("x", "X", ""),
-    46: ("c", "C", ""),   47: ("v", "V", ""),   48: ("b", "B", ""),
-    49: ("n", "N", ""),   50: (",", "?", ""),   51: (";", ".", ""),
-    52: (":", "/", ""),   53: ("!", "§", ""),
-}
 
 # Level within a layout group: 0 plain, 1 shift, 2 altgr, 3 altgr+shift.
 def _level(shift: bool, altgr: bool) -> int:
@@ -55,12 +39,19 @@ def _level(shift: bool, altgr: bool) -> int:
 class KeyTranslator:
     """Map evdev keycodes to characters, and report the active layout."""
 
+    source = "xkbcommon"
+
     def __init__(self, force_layout: str | None = None):
         self._backend = layout_mod.detect_backend()
         self._force_layout = force_layout
         self._keymap = None
         self._keymap_codes: list[str] = []
         self._build_keymap()
+        if self._keymap is None:
+            raise RuntimeError(
+                "Could not compile an xkb keymap for the detected layout "
+                f"({', '.join(self._codes())}). Try --force-layout fr."
+            )
 
     # -- keymap ---------------------------------------------------------
 
@@ -76,9 +67,6 @@ class KeyTranslator:
     def _build_keymap(self) -> None:
         """Compile the session's layout list into an xkb keymap."""
         codes = self._codes()
-        if _xkb is None:
-            self._keymap_codes = codes
-            return
         if self._keymap is not None and codes == self._keymap_codes:
             return
         try:
@@ -100,10 +88,6 @@ class KeyTranslator:
     @property
     def backend_name(self) -> str:
         return self._backend.name
-
-    @property
-    def source(self) -> str:
-        return "xkbcommon" if self._keymap is not None else "builtin-azerty"
 
     # -- layout state ---------------------------------------------------
 
@@ -157,22 +141,6 @@ class KeyTranslator:
                   altgr: bool = False) -> str | None:
         """Return the character for a keycode, or None if it is not printable."""
         self._build_keymap()
-        if self._keymap is None:
-            return self._translate_builtin(evdev_keycode, shift, altgr)
-        return self._translate_xkb(evdev_keycode, shift, altgr)
-
-    def _translate_builtin(self, evdev_keycode: int, shift: bool, altgr: bool) -> str | None:
-        entry = _AZERTY.get(evdev_keycode)
-        if not entry:
-            return None
-        base, shifted, alt = entry
-        if altgr:
-            return alt or None
-        if shift:
-            return shifted or None
-        return base or None
-
-    def _translate_xkb(self, evdev_keycode: int, shift: bool, altgr: bool) -> str | None:
         keycode = evdev_keycode + 8
         group = self._group()
         level = _level(shift, altgr)

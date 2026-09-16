@@ -12,16 +12,14 @@ Run as `frfix-bootstrap`, or `python -m frfix.bootstrap`.
 import sys
 
 
-def engine_available() -> bool:
+def main() -> int:
     try:
         import grammalecte  # noqa: F401
+        print("frfix: Grammalecte engine already present.")
+        return 0
     except ImportError:
-        return False
-    return True
+        pass
 
-
-def install_engine() -> bool:
-    """Trigger pygrammalecte's one-time download of the Grammalecte engine."""
     try:
         from pygrammalecte import grammalecte_text
     except ImportError:
@@ -29,31 +27,23 @@ def install_engine() -> bool:
             "frfix: pygrammalecte is not installed. Run 'pip install -e .' first.",
             file=sys.stderr,
         )
-        return False
+        return 1
 
     print("frfix: downloading the Grammalecte French engine (one time)...")
     try:
-        # The call itself is what performs the install; the result is unused.
-        list(grammalecte_text("Ceci est un test."))
+        list(grammalecte_text("Ceci est un test."))  # the call performs the install
+        import grammalecte  # noqa: F401
     except Exception as exc:
-        print(f"frfix: could not install the Grammalecte engine: {exc}", file=sys.stderr)
-        return False
-    return engine_available()
+        print(
+            f"frfix: could not install the Grammalecte engine: {exc}\n"
+            "       It is downloaded from grammalecte.net, so check network "
+            "access and retry.",
+            file=sys.stderr,
+        )
+        return 1
 
-
-def main() -> int:
-    if engine_available():
-        print("frfix: Grammalecte engine already present.")
-        return 0
-    if install_engine():
-        print("frfix: Grammalecte engine installed.")
-        return 0
-    print(
-        "frfix: the Grammalecte engine is still missing. It is downloaded from\n"
-        "       grammalecte.net, so check network access and retry.",
-        file=sys.stderr,
-    )
-    return 1
+    print("frfix: Grammalecte engine installed.")
+    return 0
 
 
 if __name__ == "__main__":

@@ -399,15 +399,3 @@ def detect_backend() -> LayoutBackend:
 def is_french_code(code: str) -> bool:
     """Return True if an xkb layout code is a French layout."""
     return code.split(":")[0] in FRENCH_CODES
-
-
-def is_french_layout() -> bool:
-    """Return True if the active keyboard layout is French."""
-    backend = detect_backend()
-    codes = backend.layouts()
-    if not codes:
-        return False
-    index = backend.current_index()
-    if index >= len(codes):
-        return False
-    return is_french_code(codes[index])

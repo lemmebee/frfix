@@ -29,7 +29,7 @@ Think of it as a French-only, system-wide spellchecker that *acts* instead of un
 - **Elisions**: `cest` → `c'est`, `jai` → `j'ai`, `lhomme` → `l'homme`, `cetait` → `c'était`, `quil` → `qu'il`
 - **AZERTY/QWERTY typos**: `vrqi` → `vrai`, `fqire` → `faire`, `voulqis` → `voulais` (q/a swaps and similar)
 - **Grammar** at sentence boundaries: `tu peut` → `tu peux`, `je veut` → `je veux`, agreement nits
-- **Undo**: hit `Ctrl+Z` immediately after a correction to revert it. Frfix tracks recent corrections in a small ring buffer.
+- **Undo**: hit `Ctrl+Z` immediately after a correction to revert it. Only the most recent correction can be undone.
 
 Conservative by design — it will not touch a word that is already valid French. False positives are the enemy.
 
@@ -76,7 +76,6 @@ between systems is probed at runtime and the first working option wins:
 | Concern | Probe order |
 |---|---|
 | Layout detection | Hyprland → Sway → GNOME → X11 (`setxkbmap`) → `XKB_DEFAULT_LAYOUT` |
-| Keycode → character | libxkbcommon → built-in AZERTY table |
 | Injection | `wtype` (Wayland) → `xdotool` (X11) → `ydotool` (either) |
 | System packages | `pacman`, `apt-get`, `dnf`, `zypper`, `apk`, `xbps`, `emerge` |
 
@@ -136,7 +135,6 @@ Config file: `~/.config/frfix/frfix.toml` (auto-created with defaults on first r
 
 ```toml
 [general]
-enabled = true
 # Switch the keyboard to French when the daemon starts, restoring the previous
 # layout on exit. Off by default: as a login service this would override the
 # layout you actually chose.
@@ -145,22 +143,11 @@ auto_switch_layout = false
 [corrections]
 spelling = true     # word-level: accents, typos, elisions
 grammar  = true     # sentence-level grammalecte rules
-
-[overlay]
-enabled       = true
-duration_ms   = 1500
-bg_color      = "#1a1a2e"
-text_color    = "#e0e0e0"
-highlight_color = "#4ecca3"
-
-[exclusions]
-apps          = ["keepassxc", "1password", "bitwarden"]
-window_titles = ["password", "mot de passe", "sudo"]
 ```
 
 **Custom dictionary**: `~/.config/frfix/dictionary.txt` — one word per line. Anything listed here is treated as a valid French word and never corrected. Use it for names, jargon, brand names.
 
-**Exclusions**: focused windows whose app class or title match any pattern are skipped entirely. Password managers and `sudo` prompts are excluded by default — corrections must never touch typed secrets.
+frfix never logs keystrokes, never persists what you typed, and never sends anything over the network. It corrects in whatever window has focus while a French layout is active, including password fields; there is no per-app exclusion.
 
 ## CLI
 
@@ -195,7 +182,7 @@ that protocol; on those, install `ydotool` and run `ydotoold`.
 ## Troubleshooting
 
 - **`PermissionError` opening `/dev/input/event*`** — you're not in the `input` group, or you haven't logged out and back in since being added.
-- **Nothing gets corrected** — check `frfix --debug`. If keystrokes don't print, evdev access is broken. If words print but corrections don't fire, hunspell isn't installed or the layout isn't `fr`.
+- **Nothing gets corrected** — check `frfix --debug`. If keystrokes don't print, evdev access is broken. If words print but corrections don't fire, check that the layout is `fr` and `corrections.spelling` is on.
 - **Corrections fire but garble the word** — injection timing. Try running outside a terminal multiplexer, or switch backend (install `ydotool`).
 - **Nothing corrected in most windows, but it works in some** — the `xdotool` backend was picked on a Wayland session, so only XWayland windows receive the keystrokes. Install `wtype`. The startup banner names the backend in use.
 - **`ImportError: The Grammalecte engine is missing`** — run `.venv/bin/frfix-bootstrap`. It downloads the engine from grammalecte.net, so it needs network access.
@@ -215,17 +202,12 @@ frfix/
 │   ├── corrector.py   # grammalecte spelling + grammar
 │   ├── injector.py    # wtype / xdotool / ydotool synthesis
 │   ├── bootstrap.py   # one-time Grammalecte engine download
-│   ├── overlay.py     # optional GTK toast (not wired in yet)
 │   └── config.py      # TOML config + user dictionary
 ├── systemd/frfix.service
 ├── assets/icon.svg
 ├── setup.sh
 └── pyproject.toml
 ```
-
-## Security model
-
-frfix never logs keystrokes, never persists what you typed, and never sends anything over the network. The default exclusion list keeps it out of password managers and `sudo` prompts. If you type secrets in an unusual app, add it to `exclusions.apps` in the config.
 
 ## License
 

@@ -17,7 +17,6 @@ class Correction:
     """A single correction within a text."""
     start: int
     end: int
-    original: str
     replacement: str
 
 
@@ -129,7 +128,6 @@ class FrenchCorrector:
                         end = err.get("nEnd", 0)
                         corrections.append(Correction(
                             start=start, end=end,
-                            original=sentence[start:end],
                             replacement=sugg[0],
                         ))
         except Exception:

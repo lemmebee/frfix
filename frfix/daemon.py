@@ -4,13 +4,12 @@ import asyncio
 import signal
 import sys
 
-from .buffer import TextBuffer, EventType
-from .capture import KeystrokeCapture, KeyAction
+from .buffer import EventType, TextBuffer
+from .capture import KeyAction, KeystrokeCapture
 from .config import load_config
 from .corrector import FrenchCorrector
 from .injector import TextInjector
 from .xchar import KeyTranslator
-
 
 LAYOUT_CHECK_INTERVAL = 2.0
 
@@ -96,7 +95,6 @@ class FrfixDaemon:
                     task.cancel()
             self._restore_layout()
             self.translator.close()
-            self.injector.close()
             print("frfix stopped.")
 
     async def _consume_events(self) -> None:
@@ -112,9 +110,7 @@ class FrfixDaemon:
             self._handle_undo()
             return
 
-        if key_event.action in (KeyAction.ARROW, KeyAction.TAB,
-                                KeyAction.ESCAPE, KeyAction.ENTER,
-                                KeyAction.MODIFIER):
+        if key_event.action == KeyAction.RESET:
             self.buffer.reset()
             return
 
@@ -123,9 +119,7 @@ class FrfixDaemon:
             return
 
         if key_event.action == KeyAction.SPACE:
-            event = self.buffer.feed_char(" ")
-            if event.type == EventType.WORD_COMPLETE:
-                self._correct_word(event.word, extra_bs=1)
+            self._feed(" ")
             return
 
         if key_event.action == KeyAction.CHAR:
@@ -135,19 +129,23 @@ class FrfixDaemon:
                 altgr=key_event.altgr,
             )
             if self._debug:
-                print(f"  [char] {repr(char)} (keycode={key_event.evdev_keycode}, "
+                print(f"  [char] {char!r} (keycode={key_event.evdev_keycode}, "
                       f"shift={key_event.shift}) | word={self.buffer.current_word!r}")
             if char:
-                event = self.buffer.feed_char(char)
-                if event.type == EventType.WORD_COMPLETE:
-                    self._correct_word(event.word, extra_bs=1)
-                elif event.type == EventType.SENTENCE_COMPLETE:
-                    if event.word:
-                        self._correct_word(event.word, extra_bs=1)
-                    if self.config.grammar:
-                        self._correct_sentence(event.sentence)
+                self._feed(char)
 
-    def _correct_word(self, word: str, extra_bs: int = 1) -> None:
+    def _feed(self, char: str) -> None:
+        """Feed one character to the buffer and act on whatever it triggers."""
+        event = self.buffer.feed_char(char)
+        if event.type == EventType.WORD_COMPLETE:
+            self._correct_word(event.word)
+        elif event.type == EventType.SENTENCE_COMPLETE:
+            if event.word:
+                self._correct_word(event.word)
+            if self.config.grammar:
+                self._correct_sentence(event.sentence)
+
+    def _correct_word(self, word: str) -> None:
         """Check and correct a single word."""
         if not self.config.spelling:
             return
@@ -160,7 +158,7 @@ class FrfixDaemon:
             print(f"  [result] {word!r} -> {correction!r}")
 
         if correction and correction != word:
-            self.injector.replace_word(word, correction, extra_backspaces=extra_bs)
+            self.injector.replace_word(word, correction, extra_backspaces=1)
             self.buffer.push_correction(word, correction)
             self.buffer.reset()
 
