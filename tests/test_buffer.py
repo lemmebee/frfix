@@ -21,6 +21,7 @@ def test_space_completes_a_word_and_moves_it_into_the_sentence():
     event = buf.feed_char(" ")
     assert event.type is EventType.WORD_COMPLETE
     assert event.word == "bonjour"
+    assert event.separator == " "
     assert buf.current_word == ""
     assert buf.current_sentence == "bonjour "
 
@@ -31,6 +32,7 @@ def test_word_boundary_punctuation_completes_a_word():
     event = buf.feed_char(",")
     assert event.type is EventType.WORD_COMPLETE
     assert event.word == "salut"
+    assert event.separator == ","
     assert buf.current_sentence == "salut,"
 
 
@@ -42,15 +44,15 @@ def test_repeated_separator_yields_no_event():
     assert event.word == ""
 
 
-def test_sentence_ending_reports_word_and_sentence_and_clears_both():
+def test_sentence_ending_reports_the_word_and_keeps_the_sentence():
     buf = TextBuffer()
     feed(buf, "salut le monde")
     event = buf.feed_char(".")
     assert event.type is EventType.SENTENCE_COMPLETE
     assert event.word == "monde"
-    assert event.sentence == "salut le monde."
+    assert event.separator == "."
     assert buf.current_word == ""
-    assert buf.current_sentence == ""
+    assert buf.current_sentence == "salut le monde."
 
 
 def test_sentence_ending_right_after_a_separator_has_an_empty_word():
@@ -59,7 +61,7 @@ def test_sentence_ending_right_after_a_separator_has_an_empty_word():
     event = buf.feed_char("!")
     assert event.type is EventType.SENTENCE_COMPLETE
     assert event.word == ""
-    assert event.sentence == "fini !"
+    assert buf.current_sentence == "fini !"
 
 
 def test_backspace_trims_the_current_word():
@@ -130,3 +132,34 @@ def test_reset_does_not_drop_the_undo_history():
     buf.push_correction("ca", "ça")
     buf.reset()
     assert buf.pop_correction() == ("ca", "ça")
+
+
+def test_drop_correction_forgets_the_undo_history():
+    buf = TextBuffer()
+    buf.push_correction("ca", "ça")
+    buf.drop_correction()
+    assert buf.pop_correction() is None
+
+
+def test_a_correction_patches_the_end_of_the_sentence():
+    buf = TextBuffer()
+    feed(buf, "un ca ")
+    buf.push_correction("ca ", "ça ")
+    assert buf.current_sentence == "un ça "
+
+
+def test_the_sentence_survives_a_word_correction():
+    buf = TextBuffer()
+    feed(buf, "ca ")
+    buf.push_correction("ca ", "ça ")
+    feed(buf, "va bien.")
+    assert buf.current_sentence == "ça va bien."
+
+
+def test_backspace_after_a_correction_pulls_the_corrected_word_back():
+    buf = TextBuffer()
+    feed(buf, "ca ")
+    buf.push_correction("ca ", "ça ")
+    buf.feed_backspace()
+    assert buf.current_word == "ça"
+    assert buf.current_sentence == ""

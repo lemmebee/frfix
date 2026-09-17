@@ -1,6 +1,7 @@
 """frfix — main daemon entry point."""
 
 import asyncio
+import os
 import signal
 import sys
 
@@ -110,6 +111,10 @@ class FrfixDaemon:
             self._handle_undo()
             return
 
+        # Any other key moves the caret (typing, backspace, arrows, shortcuts),
+        # so an undo after it would backspace over the wrong text.
+        self.buffer.drop_correction()
+
         if key_event.action == KeyAction.RESET:
             self.buffer.reset()
             return
@@ -138,14 +143,17 @@ class FrfixDaemon:
         """Feed one character to the buffer and act on whatever it triggers."""
         event = self.buffer.feed_char(char)
         if event.type == EventType.WORD_COMPLETE:
-            self._correct_word(event.word)
+            self._correct_word(event.word, event.separator)
         elif event.type == EventType.SENTENCE_COMPLETE:
             if event.word:
-                self._correct_word(event.word)
+                self._correct_word(event.word, event.separator)
             if self.config.grammar:
-                self._correct_sentence(event.sentence)
+                # Read the sentence back from the buffer: the word correction
+                # above may have patched its last word.
+                self._correct_sentence(self.buffer.current_sentence)
+            self.buffer.reset()
 
-    def _correct_word(self, word: str) -> None:
+    def _correct_word(self, word: str, separator: str) -> None:
         """Check and correct a single word."""
         if not self.config.spelling:
             return
@@ -158,9 +166,8 @@ class FrfixDaemon:
             print(f"  [result] {word!r} -> {correction!r}")
 
         if correction and correction != word:
-            self.injector.replace_word(word, correction, extra_backspaces=1)
-            self.buffer.push_correction(word, correction)
-            self.buffer.reset()
+            self.injector.replace_word(word + separator, correction + separator)
+            self.buffer.push_correction(word + separator, correction + separator)
 
             if self._debug:
                 print(f"  [corrected] {word!r} -> {correction!r}")
@@ -183,15 +190,18 @@ class FrfixDaemon:
         if self._debug:
             print(f"  [grammar] {sentence!r} -> {corrected!r}")
 
-        self.injector.send_backspaces(len(sentence))
-        self.injector.send_string(corrected)
+        # Only retype from the first changed character on.
+        keep = len(os.path.commonprefix([sentence, corrected]))
+        self.injector.send_backspaces(len(sentence) - keep)
+        self.injector.send_string(corrected[keep:])
+        self.buffer.push_correction(sentence, corrected)
 
     def _handle_undo(self) -> None:
         """Undo last correction."""
         last = self.buffer.pop_correction()
         if last:
-            old_word, corrected_word = last
-            self.injector.replace_word(corrected_word, old_word, extra_backspaces=0)
+            old, corrected = last
+            self.injector.replace_word(corrected, old)
             self.buffer.reset()
 
     async def _layout_checker(self) -> None:

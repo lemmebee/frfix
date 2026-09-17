@@ -114,9 +114,7 @@ class TextInjector:
             return
         self._send_string(text)
 
-    def replace_word(self, old_word: str, new_word: str, extra_backspaces: int = 0) -> None:
-        """Replace the last typed word, restoring any separator that followed it."""
-        self.send_backspaces(len(old_word) + extra_backspaces)
+    def replace_word(self, old_word: str, new_word: str) -> None:
+        """Backspace over the last typed text and type its replacement."""
+        self.send_backspaces(len(old_word))
         self.send_string(new_word)
-        if extra_backspaces > 0:
-            self.send_string(" ")
