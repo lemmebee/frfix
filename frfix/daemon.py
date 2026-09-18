@@ -64,10 +64,9 @@ class FrfixDaemon:
 
         if not self._skip_layout_check:
             self._is_french = self.translator.is_french()
-            layout_task = asyncio.create_task(self._layout_checker())
-        else:
-            self._is_french = True
-            layout_task = None
+        # Runs even with --no-layout-check: the tick is what keeps the
+        # translator's keymap group following real layout switches.
+        layout_task = asyncio.create_task(self._layout_checker())
 
         self._print_banner()
 
@@ -92,8 +91,7 @@ class FrfixDaemon:
             pass
         finally:
             for task in (consumer, stopper, layout_task):
-                if task:
-                    task.cancel()
+                task.cancel()
             self._restore_layout()
             self.translator.close()
             print("frfix stopped.")
@@ -101,6 +99,13 @@ class FrfixDaemon:
     async def _consume_events(self) -> None:
         """Feed captured keystrokes into the correction pipeline."""
         async for key_event in self.capture.events():
+            # wtype/xdotool speak to the compositor, not to /dev/input, so they
+            # never loop back here. ydotool's uinput device can, but the pin
+            # only ever settles on whichever keyboard produced the FIRST real
+            # key, and no injection happens before that. Before the layout
+            # gate on purpose, so a wrong startup device cannot lock
+            # corrections off.
+            self.translator.saw_real_key()
             if not self._is_french:
                 self.buffer.reset()
                 continue
@@ -207,8 +212,11 @@ class FrfixDaemon:
     async def _layout_checker(self) -> None:
         while True:
             await asyncio.sleep(LAYOUT_CHECK_INTERVAL)
+            french = self.translator.is_french()
+            if self._skip_layout_check:
+                continue
             was_french = self._is_french
-            self._is_french = self.translator.is_french()
+            self._is_french = french
             if was_french != self._is_french:
                 if self._is_french:
                     print("French layout detected — corrections enabled")

@@ -92,6 +92,18 @@ def test_restore_puts_the_index_back(translator):
     assert translator._backend.set_calls == [1]
 
 
+def test_switch_to_records_the_new_group_without_re_observing(translator):
+    translator.switch_to("us")
+    translator._backend._index = 0          # a backend that would now answer differently
+    assert translator._group() == 1
+
+
+def test_restore_records_the_restored_group_without_re_observing(translator):
+    translator.restore(1)
+    translator._backend._index = 0
+    assert translator._group() == 1
+
+
 AZERTY_CASES = [
     (16, False, False, "a"),
     (16, True, False, "A"),
@@ -138,15 +150,54 @@ def test_a_forced_layout_absent_from_the_session_uses_the_first_group(monkeypatc
     assert trans._group() == 0
 
 
-def test_the_translation_group_follows_the_active_layout(translator):
+def test_the_translation_group_follows_the_last_observed_layout(translator):
     assert translator._group() == 0
     translator._backend._index = 1
+    translator.active_layout()
     assert translator._group() == 1
 
 
 def test_an_out_of_range_active_index_translates_against_the_first_group(translator):
     translator._backend._index = 9
+    translator.active_layout()
     assert translator._group() == 0
+
+
+class CountingBackend(FakeBackend):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.queries = 0
+
+    def layouts(self):
+        self.queries += 1
+        return super().layouts()
+
+    def current_index(self):
+        self.queries += 1
+        return super().current_index()
+
+
+def test_translate_never_asks_the_backend_which_group_is_active(monkeypatch):
+    """The backend is a subprocess spawn on Hyprland: querying it per keystroke
+    is slow and, worse, can sample a different state than the daemon's layout
+    check saw. Keystrokes must translate against the last observed state."""
+
+    backend = CountingBackend(codes=("fr", "us"))
+    monkeypatch.setattr(layout_mod, "detect_backend", lambda: backend)
+    trans = KeyTranslator()
+    trans.is_french()
+    before = backend.queries
+    for _ in range(50):
+        trans.translate(16)
+    assert backend.queries == before
+
+
+def test_a_layout_switch_takes_effect_once_observed(translator):
+    assert translator.translate(16) == "a"      # AZERTY
+    translator._backend._index = 1              # session switched to us
+    assert translator.translate(16) == "a"      # not observed yet: unchanged
+    translator.is_french()                      # what the daemon polls
+    assert translator.translate(16) == "q"      # QWERTY
 
 
 def test_source_names_the_active_keymap(translator):

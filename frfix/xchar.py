@@ -46,27 +46,34 @@ class KeyTranslator:
         self._force_layout = force_layout
         self._keymap = None
         self._keymap_codes: list[str] = []
-        self._build_keymap()
+        # Group last seen active, as observed by _observe(). translate() reads
+        # this instead of asking the backend, so a keystroke never shells out
+        # and never disagrees with what the daemon's layout check last saw.
+        self._active_index = 0
+        self._observe()
         if self._keymap is None:
             raise RuntimeError(
                 "Could not compile an xkb keymap for the detected layout "
-                f"({', '.join(self._codes())}). Try --force-layout fr."
+                f"({', '.join(self._keymap_codes)}). Try --force-layout fr."
             )
 
     # -- keymap ---------------------------------------------------------
 
-    def _codes(self) -> list[str]:
-        """Layout codes to compile, always with something usable in them."""
-        codes = self._backend.layouts()
-        if codes:
-            return codes
-        if self._force_layout:
-            return [self._force_layout]
-        return ["fr"]
+    def _observe(self) -> list[str]:
+        """Ask the backend for the session's layouts and active group.
 
-    def _build_keymap(self) -> None:
+        The only place the translation path reads the active group from the
+        backend. Returns the session's layout codes (possibly empty).
+        """
+        codes = self._backend.layouts()
+        self._active_index = self._backend.current_index()
+        self._build_keymap(codes)
+        return codes
+
+    def _build_keymap(self, session_codes: list[str]) -> None:
         """Compile the session's layout list into an xkb keymap."""
-        codes = self._codes()
+        # Always compile something usable, even when the backend reports nothing.
+        codes = session_codes or [self._force_layout or "fr"]
         if self._keymap is not None and codes == self._keymap_codes:
             return
         try:
@@ -98,13 +105,10 @@ class KeyTranslator:
         """xkb code of the layout currently in effect, e.g. "fr"."""
         if self._force_layout:
             return self._force_layout
-        codes = self._backend.layouts()
-        if not codes:
+        codes = self._observe()
+        if self._active_index >= len(codes):
             return ""
-        index = self._backend.current_index()
-        if index >= len(codes):
-            return ""
-        return codes[index]
+        return codes[self._active_index]
 
     def is_french(self) -> bool:
         active = self.active_layout()
@@ -120,10 +124,15 @@ class KeyTranslator:
             return None
         if not self._backend.set_index(codes.index(code)):
             return None
+        self._active_index = codes.index(code)
         return previous
 
     def restore(self, index: int) -> None:
         self._backend.set_index(index)
+        self._active_index = index
+
+    def saw_real_key(self) -> None:
+        self._backend.saw_real_key()
 
     def _group(self) -> int:
         """Index of the layout to translate against."""
@@ -132,15 +141,13 @@ class KeyTranslator:
             if self._force_layout in codes:
                 return codes.index(self._force_layout)
             return 0
-        index = self._backend.current_index()
-        return index if index < len(codes) else 0
+        return self._active_index if self._active_index < len(codes) else 0
 
     # -- translation ----------------------------------------------------
 
     def translate(self, evdev_keycode: int, shift: bool = False,
                   altgr: bool = False) -> str | None:
         """Return the character for a keycode, or None if it is not printable."""
-        self._build_keymap()
         keycode = evdev_keycode + 8
         group = self._group()
         level = _level(shift, altgr)

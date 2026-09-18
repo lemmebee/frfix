@@ -1,11 +1,16 @@
 """End-to-end tests for the daemon's correction pipeline."""
 
 import asyncio
+import contextlib
+import json
 
 import pytest
+from test_xchar import FakeBackend
 
+from frfix import layout as layout_mod
 from frfix.capture import KeyAction, KeyEvent
 from frfix.daemon import FrfixDaemon
+from frfix.layout import HyprlandBackend
 
 
 class FakeInjector:
@@ -74,6 +79,9 @@ class FakeTranslator:
         return None
 
     def restore(self, index):
+        pass
+
+    def saw_real_key(self):
         pass
 
     def close(self):
@@ -303,6 +311,115 @@ def test_a_french_layout_lets_the_same_keystrokes_through(daemon):
     )
     asyncio.run(daemon._consume_events())
     assert daemon.injector.calls == [("replace", "ca ", "ça ")]
+
+
+async def _one_checker_tick(daemon):
+    task = asyncio.create_task(daemon._layout_checker())
+    await asyncio.sleep(0.01)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
+def test_a_layout_switch_seen_by_the_checker_changes_what_keystrokes_translate_to(
+    monkeypatch,
+):
+    """Real translator, fake session: us active at start, switched to fr
+    without any keystroke in between. The periodic check must both re-enable
+    corrections and make the next keystroke translate as AZERTY."""
+
+    backend = FakeBackend(codes=("us", "fr"), index=0)
+    monkeypatch.setattr(layout_mod, "detect_backend", lambda: backend)
+    monkeypatch.setattr("frfix.daemon.load_config", lambda: _config())
+    monkeypatch.setattr("frfix.daemon.TextInjector", lambda: FakeInjector())
+    monkeypatch.setattr("frfix.daemon.KeystrokeCapture", lambda: object())
+    monkeypatch.setattr("frfix.daemon.FrenchCorrector", lambda user_words=None: FakeCorrector())
+    monkeypatch.setattr("frfix.daemon.LAYOUT_CHECK_INTERVAL", 0)
+    daemon = FrfixDaemon()
+    daemon._is_french = daemon.translator.is_french()
+    assert daemon._is_french is False
+    assert daemon.translator.translate(16) == "q"
+
+    backend._index = 1
+    asyncio.run(_one_checker_tick(daemon))
+    assert daemon._is_french is True
+    assert daemon.translator.translate(16) == "a"
+
+
+def _real_daemon(monkeypatch, backend, **kwargs):
+    """A daemon with a real translator on top of `backend`; everything else fake."""
+    monkeypatch.setattr(layout_mod, "detect_backend", lambda: backend)
+    monkeypatch.setattr("frfix.daemon.load_config", lambda: _config())
+    monkeypatch.setattr("frfix.daemon.TextInjector", lambda: FakeInjector())
+    monkeypatch.setattr("frfix.daemon.KeystrokeCapture", lambda: object())
+    monkeypatch.setattr("frfix.daemon.FrenchCorrector", lambda user_words=None: FakeCorrector())
+    monkeypatch.setattr("frfix.daemon.LAYOUT_CHECK_INTERVAL", 0)
+    return FrfixDaemon(**kwargs)
+
+
+def _hypr_devices(main: str) -> str:
+    """Two Hyprland 'keyboards': the real one (French) and a power button
+    Hyprland also lists, still on layout[0] because it never sees the layout
+    hotkey. `main` names whichever last produced input."""
+    return json.dumps({"keyboards": [
+        {"name": name, "main": name == main, "layout": "us,fr",
+         "active_keymap": keymap}
+        for name, keymap in (("power-button", "English (US)"), ("real", "French"))
+    ]})
+
+
+def test_the_startup_window_self_corrects_on_the_first_real_key(monkeypatch):
+    """frfix starts as a user service, before any keypress, so Hyprland's
+    "main" may be a non-keyboard endpoint pinned at layout[0]. The first real
+    key moves "main" to the user's keyboard; that is the device to trust,
+    and a later wtype-induced flip must not undo it."""
+
+    monkeypatch.setattr(layout_mod, "_xkb_descriptions",
+                        lambda: {"fr": "French", "us": "English (US)"})
+    monkeypatch.setattr(layout_mod, "hyprland_signature", lambda: "sig")
+    backend = HyprlandBackend()
+    backend._hyprctl = lambda *a, **k: _hypr_devices(main="power-button")
+    daemon = _real_daemon(monkeypatch, backend)
+    daemon._is_french = daemon.translator.is_french()
+    assert daemon._is_french is False
+
+    backend._hyprctl = lambda *a, **k: _hypr_devices(main="real")
+    daemon.capture = FakeCapture([KeyEvent(action=KeyAction.CHAR, evdev_keycode=16)])
+    asyncio.run(daemon._consume_events())
+    assert backend._trusted is True
+    assert backend._device == "real"
+    asyncio.run(_one_checker_tick(daemon))
+    assert daemon._is_french is True
+
+    backend._hyprctl = lambda *a, **k: _hypr_devices(main="power-button")
+    asyncio.run(_one_checker_tick(daemon))
+    assert daemon._is_french is True
+
+
+class _SlowCapture:
+    """Switches the session's layout once the daemon is up, then types one
+    key late enough for the layout checker to have ticked."""
+
+    def __init__(self, backend):
+        self._backend = backend
+
+    async def events(self):
+        self._backend._index = 1
+        await asyncio.sleep(0.01)
+        yield KeyEvent(action=KeyAction.CHAR, evdev_keycode=16)
+
+
+def test_no_layout_check_still_translates_against_the_live_layout(monkeypatch):
+    """--no-layout-check only disables the French gate. The keymap group
+    must still follow a real layout switch made after startup, as it did
+    when translate() queried the backend per keystroke."""
+
+    backend = FakeBackend(codes=("us", "fr"), index=0)
+    daemon = _real_daemon(monkeypatch, backend, skip_layout_check=True)
+    daemon.capture = _SlowCapture(backend)
+    asyncio.run(daemon.run())
+    assert daemon._is_french is True
+    assert daemon.buffer.current_word == "a"  # AZERTY, not "q"
 
 
 def test_undo_puts_the_original_word_back(daemon):

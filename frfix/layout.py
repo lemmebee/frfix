@@ -156,6 +156,10 @@ class LayoutBackend:
         """Comma-separated xkb options, e.g. "grp:alt_shift_toggle"."""
         return ""
 
+    def saw_real_key(self) -> None:
+        """The user pressed a physical key. Backends that track a device may
+        trust the compositor's notion of the active keyboard right now."""
+
 
 class HyprlandBackend(LayoutBackend):
     """Hyprland: `hyprctl devices` reports layouts and the active keymap."""
@@ -164,6 +168,7 @@ class HyprlandBackend(LayoutBackend):
 
     def __init__(self):
         self._device: str | None = None
+        self._trusted = False
         self._signature = hyprland_signature()
 
     def available(self) -> bool:
@@ -185,12 +190,17 @@ class HyprlandBackend(LayoutBackend):
             return None
         if not keyboards:
             return None
-        for kb in keyboards:
-            if kb.get("main"):
-                self._device = kb.get("name")
-                return kb
-        self._device = keyboards[0].get("name")
-        return keyboards[0]
+        # Hyprland moves "main" to whatever keyboard last produced input, and
+        # our own wtype injections count. Each device carries its own layout
+        # state, so once a real key has shown us the user's keyboard, pin it.
+        # ponytail: never follows the user to a second physical keyboard; if
+        # that bites, re-resolve from the daemon on real key events.
+        by_name = {kb.get("name"): kb for kb in keyboards}
+        kb = by_name.get(self._device) if self._trusted else None
+        if kb is None:
+            kb = next((k for k in keyboards if k.get("main")), keyboards[0])
+            self._device = kb.get("name")
+        return kb
 
     def layouts(self) -> list[str]:
         kb = self._main_keyboard()
@@ -207,6 +217,13 @@ class HyprlandBackend(LayoutBackend):
         if code and code in configured:
             return configured.index(code)
         return 0
+
+    def saw_real_key(self) -> None:
+        # Until the first real key "main" may be any endpoint Hyprland lists as
+        # a keyboard (power-button, headphone jack): follow it like the old
+        # code did. The read right after that key is the one to pin.
+        if not self._trusted and self._main_keyboard():
+            self._trusted = True
 
     def set_index(self, index: int) -> bool:
         if self._device is None:
@@ -240,6 +257,8 @@ class SwayBackend(LayoutBackend):
 
     def __init__(self):
         self._socket = sway_socket()
+        self._device_id = None
+        self._trusted = False
 
     def available(self) -> bool:
         return bool(self._socket) and bool(shutil.which("swaymsg"))
@@ -255,10 +274,34 @@ class SwayBackend(LayoutBackend):
             inputs = json.loads(out)
         except json.JSONDecodeError:
             return None
-        for dev in inputs:
-            if dev.get("type") == "keyboard" and dev.get("xkb_layout_names"):
-                return dev
-        return None
+        keyboards = [
+            dev for dev in inputs
+            if dev.get("type") == "keyboard" and dev.get("xkb_layout_names")
+        ]
+        if not keyboards:
+            return None
+        # Same class of bug fixed for HyprlandBackend below: an injector that
+        # creates its own virtual input (e.g. wtype's zwp_virtual_keyboard,
+        # or ydotool's uinput device) can appear in get_inputs alongside the
+        # real keyboard, and "just take the first one" can pick the wrong
+        # device's layout state right after an injection. Pin by identifier
+        # once a real key has confirmed which device the user actually
+        # types on (see saw_real_key()), same pattern as Hyprland's "main".
+        #
+        # UNVERIFIED ON A REAL SWAY SESSION: this mirrors the Hyprland fix,
+        # which was reproduced live (hyprctl devices -j flips "main" right
+        # after a wtype call, confirmed on real hardware). No Sway session
+        # was available to confirm get_inputs actually exhibits the same
+        # multi-keyboard/virtual-device behavior, or that a virtual keyboard
+        # even shows up as type "keyboard" with xkb_layout_names set. If
+        # this turns out to be unreachable on Sway, the pinning is harmless
+        # (falls back to the first keyboard exactly as before); if it's
+        # wrong in some other way, that needs a real Sway session to find.
+        if self._trusted:
+            for dev in keyboards:
+                if dev.get("identifier") == self._device_id:
+                    return dev
+        return keyboards[0]
 
     def layouts(self) -> list[str]:
         kb = self._keyboard()
@@ -274,6 +317,14 @@ class SwayBackend(LayoutBackend):
         if not kb:
             return 0
         return int(kb.get("xkb_active_layout_index", 0))
+
+    def saw_real_key(self) -> None:
+        if self._trusted:
+            return
+        kb = self._keyboard()
+        if kb:
+            self._device_id = kb.get("identifier")
+            self._trusted = True
 
     def set_index(self, index: int) -> bool:
         return self._swaymsg(
