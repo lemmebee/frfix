@@ -14,7 +14,7 @@ class EventType(Enum):
 class BufferEvent:
     type: EventType = EventType.NONE
     word: str = ""
-    sentence: str = ""
+    separator: str = ""  # the character that completed the word
 
 
 # Characters that end a word (like space)
@@ -37,18 +37,19 @@ class TextBuffer:
             self.current_sentence += self.current_word + char
             self.current_word = ""
             if word:
-                return BufferEvent(type=EventType.WORD_COMPLETE, word=word)
+                return BufferEvent(type=EventType.WORD_COMPLETE, word=word, separator=char)
             return BufferEvent()
 
         if char in SENTENCE_ENDINGS:
             word = self.current_word
-            sentence = self.current_sentence + self.current_word + char
+            self.current_sentence += self.current_word + char
             self.current_word = ""
-            self.current_sentence = ""
+            # The sentence stays in the buffer so a word correction made now
+            # can patch it; the daemon resets once it has run the grammar check.
             return BufferEvent(
                 type=EventType.SENTENCE_COMPLETE,
                 word=word,
-                sentence=sentence,
+                separator=char,
             )
 
         self.current_word += char
@@ -75,7 +76,8 @@ class TextBuffer:
         self.current_sentence = ""
 
     def push_correction(self, old: str, new: str) -> None:
-        """Remember the last correction, for a single level of undo.
+        """Remember the last correction, for a single level of undo, and
+        patch the sentence so it keeps mirroring the screen.
 
         Only the most recent one: undo backspaces at the *current* caret,
         which is only correct for the correction just made. Keeping a
@@ -83,6 +85,13 @@ class TextBuffer:
         correction, so a ring buffer here would be a bug, not a feature.
         """
         self._last_correction = (old, new)
+        head = self.current_sentence[: len(self.current_sentence) - len(old)]
+        self.current_sentence = head + new
+
+    def drop_correction(self) -> None:
+        """Forget the last correction: the caret has moved, so undo would
+        backspace over the wrong text."""
+        self._last_correction = None
 
     def pop_correction(self) -> tuple[str, str] | None:
         """Consume the last correction for undo."""

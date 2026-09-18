@@ -1,5 +1,7 @@
 """Characterization tests for layout detection."""
 
+import json
+
 import pytest
 
 from frfix import layout as layout_mod
@@ -156,10 +158,88 @@ def test_hyprland_treats_an_unset_option_as_empty(monkeypatch):
     assert backend.options() == ""
 
 
+def _hypr_devices(*keyboards: tuple[str, bool, str]) -> str:
+    return json.dumps({"keyboards": [
+        {"name": name, "main": main, "layout": "fr,us", "active_keymap": keymap}
+        for name, main, keymap in keyboards
+    ]})
+
+
+def test_hyprland_follows_main_until_the_first_real_key(hyprland, descriptions):
+    # At startup (a user service, before any keypress) "main" can be any of
+    # the endpoints Hyprland calls keyboards: power-button, headphone jack...
+    # Those never see the layout hotkey, so they must not be pinned.
+    hyprland._hyprctl = lambda *a, **k: _hypr_devices(
+        ("power-button", True, "English (US)"), ("real", False, "French"))
+    assert hyprland.current_index() == 1
+    hyprland._hyprctl = lambda *a, **k: _hypr_devices(
+        ("power-button", False, "English (US)"), ("real", True, "French"))
+    assert hyprland.current_index() == 0
+    assert hyprland._device == "real"
+
+
+def test_hyprland_pins_the_keyboard_seen_at_the_first_real_key(hyprland, descriptions):
+    # After an injection Hyprland flips "main" to another device (a real USB
+    # endpoint, here "media"), whose layout state can be stale. Keep trusting
+    # the keyboard the first real key resolved.
+    hyprland._hyprctl = lambda *a, **k: _hypr_devices(
+        ("real", True, "French"), ("media", False, "English (US)"))
+    hyprland.saw_real_key()
+    assert hyprland._trusted is True
+    hyprland._hyprctl = lambda *a, **k: _hypr_devices(
+        ("real", False, "French"), ("media", True, "English (US)"))
+    assert hyprland.current_index() == 0
+    assert hyprland._device == "real"
+
+
+def test_hyprland_does_not_pin_on_a_failed_read(hyprland):
+    hyprland._hyprctl = lambda *a, **k: None
+    hyprland.saw_real_key()
+    assert hyprland._trusted is False
+
+
+def test_hyprland_switches_the_pinned_keyboard_even_after_main_flipped(hyprland, descriptions):
+    hyprland._hyprctl = lambda *a, **k: _hypr_devices(
+        ("real", True, "French"), ("media", False, "French"))
+    hyprland.saw_real_key()
+    calls = []
+
+    def flipped(args, timeout=1.0):
+        calls.append(args)
+        return _hypr_devices(("real", False, "French"), ("media", True, "French"))
+
+    hyprland._hyprctl = flipped
+    assert hyprland.set_index(1)
+    assert calls[-1] == ["switchxkblayout", "real", "1"]
+
+
+def test_hyprland_re_resolves_when_the_pinned_keyboard_disappears(hyprland, descriptions):
+    hyprland._hyprctl = lambda *a, **k: _hypr_devices(
+        ("real", True, "French"), ("media", False, "English (US)"))
+    hyprland.saw_real_key()
+    hyprland._hyprctl = lambda *a, **k: _hypr_devices(
+        ("media", False, "English (US)"), ("laptop", True, "English (US)"))
+    assert hyprland.current_index() == 1
+    assert hyprland._device == "laptop"
+
+
+def test_hyprland_still_sees_a_real_layout_switch_on_the_pinned_keyboard(
+    hyprland, descriptions
+):
+    hyprland._hyprctl = lambda *a, **k: _hypr_devices(
+        ("real", True, "French"), ("media", False, "French"))
+    hyprland.saw_real_key()
+    assert hyprland.current_index() == 0
+    hyprland._hyprctl = lambda *a, **k: _hypr_devices(
+        ("real", True, "English (US)"), ("media", False, "French"))
+    assert hyprland.current_index() == 1
+
+
 SWAY_INPUTS = """
 [
   {"type": "pointer"},
   {"type": "keyboard",
+   "identifier": "1:1:real-keyboard",
    "xkb_layout_names": ["French", "English (US)"],
    "xkb_active_layout_index": 1}
 ]
@@ -193,6 +273,54 @@ def test_sway_survives_unparseable_output(monkeypatch):
     monkeypatch.setattr(backend, "_swaymsg", lambda args, timeout=1.0: "not json")
     assert backend.layouts() == []
     assert backend.current_index() == 0
+
+
+def _sway_devices(*keyboards: tuple[str, str, list[str], int]) -> str:
+    """Build get_inputs JSON. Each tuple: (identifier, name, layouts, index)."""
+    import json as _json
+    devices = [
+        {
+            "type": "keyboard",
+            "identifier": ident,
+            "name": name,
+            "xkb_layout_names": layouts,
+            "xkb_active_layout_index": index,
+        }
+        for ident, name, layouts, index in keyboards
+    ]
+    return _json.dumps(devices)
+
+
+def test_sway_picks_the_first_keyboard_until_a_real_key_is_seen():
+    backend = SwayBackend()
+    backend._swaymsg = lambda args, timeout=1.0: _sway_devices(
+        ("virtual", "injector", ["French"], 0), ("real", "keyboard", ["French"], 0)
+    )
+    assert backend.current_index() == 0
+
+
+def test_sway_pins_the_keyboard_seen_at_the_first_real_key():
+    backend = SwayBackend()
+    backend._swaymsg = lambda args, timeout=1.0: _sway_devices(
+        ("real", "keyboard", ["French", "English (US)"], 0),
+        ("virtual", "injector", ["French", "English (US)"], 1),
+    )
+    backend.saw_real_key()
+    assert backend.current_index() == 0
+    # A later get_inputs call where a virtual/injector device sorts first
+    # (or reports a different index) must not move the pin.
+    backend._swaymsg = lambda args, timeout=1.0: _sway_devices(
+        ("virtual", "injector", ["French", "English (US)"], 1),
+        ("real", "keyboard", ["French", "English (US)"], 0),
+    )
+    assert backend.current_index() == 0
+
+
+def test_sway_does_not_pin_on_a_failed_read():
+    backend = SwayBackend()
+    backend._swaymsg = lambda args, timeout=1.0: None
+    backend.saw_real_key()
+    assert backend._trusted is False
 
 
 def test_gnome_pulls_codes_out_of_the_gsettings_tuple_list(monkeypatch):

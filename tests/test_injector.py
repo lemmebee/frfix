@@ -127,20 +127,19 @@ def injector(monkeypatch):
     return _forced_injector(monkeypatch, "wtype")
 
 
-def test_replacing_a_word_typed_before_a_space_restores_the_space(commands, injector):
-    injector.replace_word("ca", "ça", extra_backspaces=1)
+def test_replacing_a_word_backspaces_over_it_and_types_the_new_one(commands, injector):
+    injector.replace_word("ca ", "ça ")
     assert commands == [
         ["wtype", "-k", "BackSpace", "-k", "BackSpace", "-k", "BackSpace"],
-        ["wtype", "--", "ça"],
-        ["wtype", "--", " "],
+        ["wtype", "--", "ça "],
     ]
 
 
-def test_replacing_a_word_with_no_separator_adds_none(commands, injector):
-    injector.replace_word("ca", "ça", extra_backspaces=0)
+def test_replacing_a_word_backspaces_over_the_old_length_not_the_new(commands, injector):
+    injector.replace_word("cest", "c'est")
     assert commands == [
-        ["wtype", "-k", "BackSpace", "-k", "BackSpace"],
-        ["wtype", "--", "ça"],
+        ["wtype", "-k", "BackSpace", "-k", "BackSpace", "-k", "BackSpace", "-k", "BackSpace"],
+        ["wtype", "--", "c'est"],
     ]
 
 
